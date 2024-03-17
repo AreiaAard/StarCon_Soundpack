@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+
+<muclient>
+<plugin
+	   name="SC_Soundpack"
+	   author="Areia"
+	   id="2baa2fe6167f1eae4b8d1d81"
+	   language="Lua"
+	   purpose="Sounds for Star Conquest"
+    save_state="n"
+	   date_written="2024-03-16 12:00:00"
+	   requires="5.06"
+	   version="1.0"
+	   >
+</plugin>
+
+<include name="constants.lua"/>
+
+
+	<script>
+		<![CDATA[
+local directory = GetPluginInfo(GetPluginID(), 20)
+package.path = ("%s?;%s?.lua;%s"):format(directory, directory, package.path)
+
+require "sc_soundpack"
+]]>
+</script>
+
+
+</muclient>
