@@ -5,7 +5,19 @@ require "json"
 require "var"
 require "wait"
 
-CMD_PREFIX = "sp"
+
+--------------------------------------------------------------------------------
+-- Const
+--------------------------------------------------------------------------------
+Const = {
+    CMD_PREFIX = "sp",
+    EVENT_TRIGGER_NAME = "trigger_sound_event%d",
+    EVENT_TRIGGER_RESPONSE = "Events.fire(%d)",
+    EVENT_TRIGGER_SUB = 'Util.print("%s")',
+    EVENT_USER_SCRIPT_NAME = "sound_event_script",
+    GROUP_SOUND_EVENT = "group_sound_event",
+    VERSION = "1.1.0",
+}
 
 
 --------------------------------------------------------------------------------
@@ -45,14 +57,14 @@ function Config.get_events()
         end
         return first.group < second.group
     end
-    local events = json.decode(var.events or Config.get_events_default())
+    local events = json.decode(var.events or Config.get_events_default() or "[]")
     table.sort(events, sort)
     return events
 end
 
 
-function Config.set_events(value)
-    var.events = json.encode(value)
+function Config.save_events()
+    var.events = json.encode(Events.list or {})
 end
 
 
@@ -100,6 +112,18 @@ function Sound.get_real_volume(volume)
 end
 
 
+function Sound.play_list(sounds, volume)
+    for i, sound in ipairs(sounds) do
+        local pause = tonumber(sound)
+        if pause ~= nil then
+            wait.time(pause)
+        else
+            Sound.play(sound, volume)
+        end
+    end
+end
+
+
  function Sound.play(sound_file, volume)
     sound_file = Sound.get_real_file_name(sound_file)
     volume = volume or Config.get_volume()
@@ -118,50 +142,82 @@ end
 Events = {}
 
 
-function Events.add_one(trigger)
+function Events.initialize()
+    Events.load()
+    Events.remove_all()
+    Events.add_all()
+end
+
+
+function Events.load()
+    Events.list = Config.get_events()
+end
+
+
+function Events.remove_all()
+    local deleted = DeleteTriggerGroup(Const.GROUP_SOUND_EVENT)
+    if deleted == 0 then
+        return false
+    end
+    return true
+end
+
+
+function Events.add_one(id, event)
+    local name = Const.EVENT_TRIGGER_NAME:format(id)
+    local response = Const.EVENT_TRIGGER_RESPONSE:format(id)
     local flags = trigger_flag.Enabled + trigger_flag.KeepEvaluating
         + trigger_flag.Replace + trigger_flag.Temporary
-    if trigger.regex then
+    if event.regex then
         flags = flags + trigger_flag.RegularExpression
     end
-    if trigger.gag then
+    if event.gag then
+        flags = flags + trigger_flag.OmitFromOutput
+    end
+    if event.sub ~= nil then
+        -- Add this here rather than handling it in Events.fire()
+        -- to allow users to include %1...%9 wildcards in their subs.
+        local print_call = Const.EVENT_TRIGGER_SUB:format(event.sub)
+        response = ("%s\n%s"):format(print_call, response)
         flags = flags + trigger_flag.OmitFromOutput
     end
 
-    -- Construct the response script dynamically from sounds list (if any).
-    -- Allow for numberic entries, which indicate a pause between sounds.
-    local response_lines = {}
-    table.insert(response_lines, "wait.make(function()")
-    for _, sound in ipairs(trigger.sounds or {}) do
-        local line = "    Sound.play(\"%s\")"
-        local pause = tonumber(sound)
-        if pause ~= nil then
-            line = "    wait.time(%d)"
-            line = line:format(pause)
-        else
-            line = line:format(sound)
-        end
-        table.insert(response_lines, line)
-    end
-    table.insert(response_lines, "end)")
-    if trigger.script ~= nil then
-        table.insert(response_lines, trigger.script)
-    end
-    response = table.concat(response_lines, "\n")
-
-    -- Dynamically assign a trigger name.
-				local trigger_list = GetTriggerList() or {}
-    local trigger_count = #trigger_list
-    local name = ("trigger_sound%d"):format(trigger_count)
-
     local code = AddTriggerEx(
-        name, trigger.match,
+        name, event.match,
         response, flags, custom_colour.NoChange,
-        0, "", "", sendto.script, 100
+        0, "", "", sendto.scriptafteromit, 100
     )
+
     if code ~= error_code.eOK then
         local err = error_desc[code]
         local msg = ("Failed to add trigger %s: %s."):format(name, err)
+        Util.msg(msg)
+        return false
+    end
+    code = SetTriggerOption(name, "group", Const.GROUP_SOUND_EVENT)
+    if code ~= error_code.eOK then
+        local err = error_desc[code]
+        local msg = ("Failed to set group for trigger %s: %s."):format(name, err)
+        Util.msg(msg)
+    end
+
+    return true
+end
+
+
+function Events.add_all()
+    for i, event in ipairs(Events.list or {}) do
+        Events.add_one(i, event)
+    end
+end
+
+
+function Events.execute_user_script(script)
+    local success, err = pcall(
+        loadstring(script, Const.EVENT_USER_SCRIPT_NAME)
+    )
+    if not success then
+        local msg = ("Error executing event script:\n    %s"):format(err)
         Util.msg(msg)
         return false
     end
@@ -169,18 +225,32 @@ function Events.add_one(trigger)
 end
 
 
-function Events.add_all()
-    local trigger_data = Config.get_events()
-    for i, trigger in ipairs(trigger_data) do
-        Events.add_one(trigger)
+function Events.fire(id)
+    local event = (Events.list or {})[id]
+    if event == nil then
+        -- This should never be possible, but just in case.
+        local msg = ("Error: event with ID %d does not exist."):format(id)
+        Util.msg(msg)
+        return false
     end
+
+    if event.sounds ~= nil and #event.sounds > 0 then
+        wait.make(function()
+            Sound.play_list(event.sounds, event.volume)
+        end)
+    end
+    if event.script ~= nil then
+        Events.execute_user_script(event.script)
+    end
+
+    return true
 end
 
 
-function Events.get_groups(events)
+function Events.get_groups()
     local groups = {}
     local groups_found = {}
-    for i, event in ipairs(events) do
+    for i, event in ipairs(Events.list or {}) do
         local group = event.group
         if groups_found[group] == nil then
             groups_found[group] = true
@@ -192,14 +262,50 @@ function Events.get_groups(events)
 end
 
 
-function Events.get_in_group(events, group)
+function Events.get_in_group(group)
     local in_group = {}
-    for i, event in ipairs(events) do
+    for i, event in ipairs(Events.list or {}) do
         if event.group == group then
             table.insert(in_group, event)
         end
     end
     return in_group
+end
+
+
+function Events.gag(group, index, gag)
+    local in_group = Events.get_in_group(group)
+    local event = in_group[index]
+    if event == nil then
+        return false
+    end
+    event.gag = gag
+    Config.save_events()
+    Events.initialize()
+    return true
+end
+
+
+function Events.gag_all(gag)
+    for i, event in ipairs(Events.list or {}) do
+        event.gag = gag
+    end
+    Config.save_events()
+    Events.initialize()
+    return true
+end
+
+
+function Events.sub(group, index, sub)
+    local in_group = Events.get_in_group(group)
+    local event = in_group[index]
+    if event == nil then
+        return false
+    end
+    event.sub = sub
+    Config.save_events()
+    Events.initialize()
+    return true
 end
 
 
@@ -210,19 +316,50 @@ Command = {}
 
 Command.list = {
     {
+        name = "catch_all",
+        match = "^ *" .. Const.CMD_PREFIX .. " .*$",
+        script = "Command.error",
+        sequence = 200,
+    },
+    {
+        name = "version",
+        match = "^ *" .. Const.CMD_PREFIX .. " +version *$",
+        script = "Command.version",
+    },
+    {
         name = "list_groups",
-        match = "^ *" .. CMD_PREFIX .. " +li?st? *$",
+        match = "^ *" .. Const.CMD_PREFIX .. " +li?st? *$",
         script = "Command.list_groups",
     },
     {
         name = "list_events",
-        match = "^ *" .. CMD_PREFIX .. " +li?st? +(?<group>\\w+) *$",
+        match = "^ *" .. Const.CMD_PREFIX .. " +li?st? +(?<group>\\w+) *$",
         script = "Command.list_events",
     },
     {
+        name = "display_event",
+        match = "^ *" .. Const.CMD_PREFIX .. " +li?st? +(?<group>[a-zA-Z]+) *(?<index>\\d+) *$",
+        script = "Command.display_event",
+    },
+    {
         name = "config_volume",
-        match = "^ *" .. CMD_PREFIX .. " +vol(?:ume)? +(?<value>\\d+) *$",
+        match = "^ *" .. Const.CMD_PREFIX .. " +vol(?:ume)? +(?<value>\\d+) *$",
         script = "Command.set_volume",
+    },
+    {
+        name = "gag_event",
+        match = "^ *" .. Const.CMD_PREFIX .. " +gag +(?<group>[a-zA-Z]+) *(?<index>\\d+) +(?<setting>on|off) *$",
+        script = "Command.gag_event",
+    },
+    {
+        name = "gag_all",
+        match = "^ *" .. Const.CMD_PREFIX .. " +gag +all +(?<setting>on|off) *$",
+        script = "Command.gag_all",
+    },
+    {
+        name = "sub_event",
+    match = "^ *" .. Const.CMD_PREFIX .. " +sub +(?<group>[a-zA-Z]+) *(?<index>\\d+) +(?<sub>.+?) *$",
+        script = "Command.sub_event",
     },
 }
 
@@ -242,6 +379,7 @@ function Command.add_one(command)
         Util.msg(msg)
         return false
     end
+    SetAliasOption(name, "sequence", command.sequence or 100)
     return true
 end
 
@@ -253,9 +391,19 @@ function Command.add_all()
 end
 
 
+function Command.error(alias, line, wc)
+    Util.msg("That is not a valid command.")
+end
+
+
+function Command.version(alias, line, wc)
+    local msg = ("Version: v%s."):format(Const.VERSION)
+    Util.msg(msg)
+end
+
+
 function Command.list_groups(alias, line, wc)
-    local events = Config.get_events()
-    local groups = Events.get_groups(events)
+    local groups = Events.get_groups()
     if #groups == 0 then
         Utility.msg("No event groups found.")
         return
@@ -271,8 +419,7 @@ end
 
 function Command.list_events(alias, line, wc)
     local group = wc.group:lower()
-    local events = Config.get_events()
-    local in_group = Events.get_in_group(events, group)
+    local in_group = Events.get_in_group(group)
     if #in_group == 0 then
         local msg = ("No %s events found."):format(group)
         Util.msg(msg)
@@ -291,6 +438,35 @@ function Command.list_events(alias, line, wc)
 end
 
 
+function Command.display_event(alias, line, wc)
+    local group = wc.group:lower()
+    local index = tonumber(wc.index)
+    local in_group = Events.get_in_group(group)
+    local event = in_group[index]
+    if event == nil then
+        local msg = ("No event %s%d found."):format(group, index)
+        Util.msg(msg)
+        return
+    end
+    local white = Util.ansi.misc.bold .. Util.ansi.fg.grey
+    local yellow = Util.ansi.misc.bold .. Util.ansi.fg.yellow
+    local silver = Util.ansi.misc.reset .. Util.ansi.fg.grey
+    Util.print(white, group:upper(), index)
+    Util.print(yellow, "Pattern", silver, ": ", event.match)
+    if event.sub ~= nil then
+        Util.print(yellow, "Sub", silver, ": ", event.sub)
+    else
+        Util.print(yellow, "Gag", silver, ": ", event.gag and "yes" or "no")
+    end
+    if event.sounds ~= nil and #event.sounds > 0 then
+        Util.print(yellow, "Sounds", silver, ":")
+        for i, sound in ipairs(event.sounds) do
+            Util.print(silver, sound)
+        end
+    end
+end
+
+
 function Command.set_volume(alias, line, wc)
     local value = tonumber(wc.value)
     if value < 0 or value > 100 then
@@ -299,6 +475,51 @@ function Command.set_volume(alias, line, wc)
     end
     Config.set_volume(value)
     local msg = ("Master volume set to %d."):format(value)
+    Util.msg(msg)
+end
+
+
+function Command.gag_event(alias, line, wc)
+    local group = wc.group:lower()
+    local index = tonumber(wc.index)
+    local setting = wc.setting:lower() == "on" and true or false
+    local success = Events.gag(group, index, setting)
+    if not success then
+        local msg = ("No event %s%d found."):format(group, index)
+        Util.msg(msg)
+        return
+    end
+    local msg = "%s gagging %s%d."
+    msg = msg:format(setting and "Now" or "No longer", group, index)
+    Util.msg(msg)
+end
+
+
+function Command.gag_all(alias, line, wc)
+    local setting = wc.setting:lower() == "on" and true or false
+    Events.gag_all(setting)
+    local msg = setting and "Gagging all messages." or "Not gagging anything."
+    Util.msg(msg)
+end
+
+
+function Command.sub_event(alias, line, wc)
+    local group = wc.group:lower()
+    local index = tonumber(wc.index)
+    local sub = wc.sub
+    local value = sub:lower() ~= "none" and sub or nil
+    local success = Events.sub(group, index, value)
+    if not success then
+        local msg = ("No event %s%d found."):format(group, index)
+        Util.msg(msg)
+        return
+    end
+    local msg
+    if value == nil then
+        msg = ("Removed %s%d sub."):format(group, index)
+    else
+        msg = ("Added sub for %s%d:\n    %s"):format(group, index, sub)
+    end
     Util.msg(msg)
 end
 
@@ -355,12 +576,23 @@ end
 -- Plugin Callbacks
 --------------------------------------------------------------------------------
 function OnPluginInstall()
-    Events.add_all()
+    Events.initialize()
     Command.add_all()
-    Util.msg("Loaded.")
+    local msg = ("v%s loaded."):format(Const.VERSION)
+    Util.msg(msg)
 end
 
 
 function OnPluginEnable()
     OnPluginInstall()
+end
+
+
+function OnPluginClose()
+    Events.remove_all()
+end
+
+
+function OnPluginDisable()
+    OnPluginClose()
 end
